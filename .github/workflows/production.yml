@@ -44,5 +44,4 @@ jobs:
           --platform managed \
           --service-account="xtag-service@xtag-450317.iam.gserviceaccount.com" \
           --allow-unauthenticated \
-          --set-env-vars="NODE_ENV=production" \
-          --set-secrets="GOOGLE_CLIENT_ID=GOOGLE_CLIENT_ID:latest,GOOGLE_CLIENT_SECRET=GOOGLE_CLIENT_SECRET:latest,NEXTAUTH_URL=NEXTAUTH_URL:latest,NEXTAUTH_SECRET=NEXTAUTH_SECRET:latest,MONGODB_URI=MONGODB_URI:latest,UPLOADTHING_TOKEN=UPLOADTHING_TOKEN:latest"
+          --set-env-vars="NODE_ENV=production"
