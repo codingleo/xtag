@@ -1,0 +1,929 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Next.js Clean Architecture Implementation Guide
+
+## Business Context and Objectives
+You are tasked with building a scalable, maintainable Next.js application using clean architecture principles. This approach solves these common problems:
+- Complex business logic tangled with UI code
+- Difficult-to-test components with many dependencies
+- Challenging code maintenance as the application grows
+- Poor separation of concerns making feature changes risky
+
+**Success looks like:** A modular application where business logic is independent of framework, UI changes don't affect core logic, and testing can be done at each layer independently.
+
+## Core Architecture (REQUIRED)
+
+### Project Structure
+```
+src/
+├── domains/          # Core business logic and domain models
+├── infrastructure/   # External systems implementation
+├── application/      # Use cases and orchestration
+└── app/              # Next.js UI and API routes
+```
+
+### Example Feature Flow: User Registration
+Follow this complete example to understand how a feature moves through all layers:
+
+1. **Domain Layer**:
+   ```typescript
+   // src/domains/user/entities/user.entity.ts
+   import { z } from 'zod';
+
+   export const UserSchema = z.object({
+     id: z.string().uuid().optional(),
+     name: z.string().min(3),
+     email: z.string().email(),
+     password: z.string().min(8),
+   });
+
+   export type User = z.infer<typeof UserSchema>;
+   ```
+
+   ```typescript
+   // src/domains/user/repositories/user.repository.ts
+   import { User } from '../entities/user.entity';
+
+   export interface IUserRepository {
+     createUser(userData: Omit<User, 'id'>): Promise<User>;
+     getUserByEmail(email: string): Promise<User | null>;
+   }
+   ```
+
+   ```typescript
+   // src/domains/user/use-cases/register-user.usecase.ts
+   import { User } from '../entities/user.entity';
+   import { IUserRepository } from '../repositories/user.repository';
+
+   export interface IRegisterUserUseCase {
+     execute(userData: Omit<User, 'id'>): Promise<User>;
+   }
+
+   // Interface only - implementation in application layer
+   ```
+
+2. **Infrastructure Layer**:
+   ```typescript
+   // src/infrastructure/repositories/user/user.repository.ts
+   import { User } from '@/domains/user/entities/user.entity';
+   import { IUserRepository } from '@/domains/user/repositories/user.repository';
+   import { prisma } from '@/infrastructure/database/connection';
+   import { hash } from '@/infrastructure/services/password.service';
+
+   export class UserRepository implements IUserRepository {
+     async createUser(userData: Omit<User, 'id'>): Promise<User> {
+       const hashedPassword = await hash(userData.password);
+       
+       return prisma.user.create({
+         data: {
+           ...userData,
+           password: hashedPassword,
+         },
+       });
+     }
+
+     async getUserByEmail(email: string): Promise<User | null> {
+       return prisma.user.findUnique({
+         where: { email },
+       });
+     }
+   }
+   ```
+
+3. **Application Layer**:
+   ```typescript
+   // src/application/use-cases/register-user/register-user.usecase.ts
+   import { User } from '@/domains/user/entities/user.entity';
+   import { IRegisterUserUseCase } from '@/domains/user/use-cases/register-user.usecase';
+   import { IUserRepository } from '@/domains/user/repositories/user.repository';
+   import { UserRepository } from '@/infrastructure/repositories/user/user.repository';
+
+   export class RegisterUserUseCase implements IRegisterUserUseCase {
+     constructor(private userRepository: IUserRepository) {}
+
+     async execute(userData: Omit<User, 'id'>): Promise<User> {
+       const existingUser = await this.userRepository.getUserByEmail(userData.email);
+       
+       if (existingUser) {
+         throw new Error('User with this email already exists');
+       }
+       
+       return this.userRepository.createUser(userData);
+     }
+   }
+
+   // Export instance for direct use in API routes
+   const userRepository = new UserRepository();
+   export const registerUserUseCase = new RegisterUserUseCase(userRepository);
+   ```
+
+4. **UI Layer**:
+   ```typescript
+   // src/app/api/auth/register/route.ts
+   import { NextResponse } from 'next/server';
+   import { registerUserUseCase } from '@/application/use-cases/register-user/register-user.usecase';
+   import { UserSchema } from '@/domains/user/entities/user.entity';
+
+   export async function POST(request: Request) {
+     try {
+       const body = await request.json();
+       
+       // Validate request body
+       const result = UserSchema.omit({ id: true }).safeParse(body);
+       if (!result.success) {
+         return NextResponse.json(
+           { error: result.error.flatten() },
+           { status: 400 }
+         );
+       }
+       
+       const user = await registerUserUseCase.execute(result.data);
+       
+       // Remove password from response
+       const { password, ...userWithoutPassword } = user;
+       
+       return NextResponse.json(userWithoutPassword, { status: 201 });
+     } catch (error: any) {
+       return NextResponse.json(
+         { error: error.message || 'Something went wrong' },
+         { status: 500 }
+       );
+     }
+   }
+   ```
+
+   ```tsx
+   // src/app/register/page.tsx
+   'use client';
+   
+   import { useState } from 'react';
+   import { useRouter } from 'next/navigation';
+   import { z } from 'zod';
+
+   export default function RegisterPage() {
+     const [formData, setFormData] = useState({
+       name: '',
+       email: '',
+       password: '',
+     });
+     const [errors, setErrors] = useState<any>({});
+     const [isSubmitting, setIsSubmitting] = useState(false);
+     const router = useRouter();
+
+     const handleSubmit = async (e: React.FormEvent) => {
+       e.preventDefault();
+       setIsSubmitting(true);
+       setErrors({});
+
+       try {
+         const response = await fetch('/api/auth/register', {
+           method: 'POST',
+           headers: { 'Content-Type': 'application/json' },
+           body: JSON.stringify(formData),
+         });
+
+         const data = await response.json();
+
+         if (!response.ok) {
+           setErrors(data.error);
+           return;
+         }
+
+         router.push('/login?registered=true');
+       } catch (error) {
+         setErrors({ form: 'Something went wrong' });
+       } finally {
+         setIsSubmitting(false);
+       }
+     };
+
+     // Form UI implementation...
+   }
+   ```
+
+## Dependency Injection with TSyringe
+
+Use `tsyringe` for dependency injection throughout the application to ensure all layers remain independent of each other.
+
+```typescript
+// Install tsyringe
+// npm install tsyringe reflect-metadata
+
+// Add to tsconfig.json
+{
+  "compilerOptions": {
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true
+  }
+}
+
+// Import in your entry file (e.g., src/app/layout.tsx)
+import 'reflect-metadata';
+```
+
+Register dependencies in a container:
+
+```typescript
+// src/infrastructure/di/container.ts
+import { container } from 'tsyringe';
+import { IUserRepository } from '@/domains/user/repositories/user.repository';
+import { UserRepository } from '@/infrastructure/repositories/user/user.repository';
+import { IRegisterUserUseCase } from '@/domains/user/use-cases/register-user.usecase';
+import { RegisterUserUseCase } from '@/application/use-cases/register-user/register-user.usecase';
+
+// Register repositories
+container.registerSingleton<IUserRepository>(
+  'UserRepository',
+  UserRepository
+);
+
+// Register use cases
+container.registerSingleton<IRegisterUserUseCase>(
+  'RegisterUserUseCase',
+  RegisterUserUseCase
+);
+
+export { container };
+```
+
+Use dependency injection in your classes:
+
+```typescript
+// src/application/use-cases/register-user/register-user.usecase.ts
+import { inject, injectable } from 'tsyringe';
+import { User } from '@/domains/user/entities/user.entity';
+import { IRegisterUserUseCase } from '@/domains/user/use-cases/register-user.usecase';
+import { IUserRepository } from '@/domains/user/repositories/user.repository';
+
+@injectable()
+export class RegisterUserUseCase implements IRegisterUserUseCase {
+  constructor(
+    @inject('UserRepository') private userRepository: IUserRepository
+  ) {}
+
+  async execute(userData: Omit<User, 'id'>): Promise<User> {
+    // Implementation...
+  }
+}
+```
+
+Access dependencies in your server actions or API routes:
+
+```typescript
+// src/app/actions/register-user.action.ts
+'use server';
+
+import { container } from '@/infrastructure/di/container';
+import { IRegisterUserUseCase } from '@/domains/user/use-cases/register-user.usecase';
+
+export async function registerUser(userData: any) {
+  const registerUserUseCase = container.resolve<IRegisterUserUseCase>('RegisterUserUseCase');
+  return registerUserUseCase.execute(userData);
+}
+```
+
+## Step-by-Step Implementation Guide
+
+### 1. Domain Layer (Days 1-2)
+
+#### 1.1 Entities, Value Objects, and Aggregates
+```typescript
+// src/domains/user/entities/user.entity.ts
+import { z } from 'zod';
+
+export const UserSchema = z.object({
+  id: z.string().uuid().optional(),
+  name: z.string().min(3),
+  email: z.string().email(),
+  password: z.string().min(8),
+  // Add more fields as needed
+});
+
+export type User = z.infer<typeof UserSchema>;
+
+// Value Object Example
+// src/domains/user/value-objects/email.value-object.ts
+export class Email {
+  private readonly value: string;
+
+  constructor(email: string) {
+    if (!this.validate(email)) {
+      throw new Error('Invalid email format');
+    }
+    this.value = email;
+  }
+
+  private validate(email: string): boolean {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailRegex.test(email);
+  }
+
+  toString(): string {
+    return this.value;
+  }
+}
+```
+
+#### 1.2 Repository Interfaces
+```typescript
+// src/domains/user/repositories/user.repository.ts
+import { User } from '../entities/user.entity';
+
+export interface IUserRepository {
+  createUser(userData: Omit<User, 'id'>): Promise<User>;
+  getUserByEmail(email: string): Promise<User | null>;
+  getUserById(id: string): Promise<User | null>;
+  // Add more methods as needed
+}
+```
+
+#### 1.3 Use Case Interfaces
+```typescript
+// src/domains/user/use-cases/register-user.usecase.ts
+import { User } from '../entities/user.entity';
+
+export interface IRegisterUserUseCase {
+  execute(userData: Omit<User, 'id'>): Promise<User>;
+}
+
+// src/domains/user/use-cases/get-user.usecase.ts
+import { User } from '../entities/user.entity';
+
+export interface IGetUserUseCase {
+  execute(id: string): Promise<User | null>;
+}
+```
+
+### 2. Repository Implementation (Days 3-4)
+
+#### 2.1 Database Models Setup
+```typescript
+// src/infrastructure/database/connection.ts
+import { PrismaClient } from '@prisma/client';
+
+const prisma = new PrismaClient();
+
+export { prisma };
+
+// prisma/schema.prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql" // or your preferred database
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  name      String
+  email     String   @unique
+  password  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+```
+
+#### 2.2 Repository Implementation
+```typescript
+// src/infrastructure/repositories/user/user.repository.ts
+import { injectable } from 'tsyringe';
+import { User } from '@/domains/user/entities/user.entity';
+import { IUserRepository } from '@/domains/user/repositories/user.repository';
+import { prisma } from '@/infrastructure/database/connection';
+import { hash } from '@/infrastructure/services/password.service';
+
+@injectable()
+export class UserRepository implements IUserRepository {
+  async createUser(userData: Omit<User, 'id'>): Promise<User> {
+    const hashedPassword = await hash(userData.password);
+    
+    return prisma.user.create({
+      data: {
+        ...userData,
+        password: hashedPassword,
+      },
+    });
+  }
+
+  async getUserByEmail(email: string): Promise<User | null> {
+    return prisma.user.findUnique({
+      where: { email },
+    });
+  }
+
+  async getUserById(id: string): Promise<User | null> {
+    return prisma.user.findUnique({
+      where: { id },
+    });
+  }
+}
+```
+
+#### 2.3 Repository Tests
+```typescript
+// src/infrastructure/repositories/user/user.repository.test.ts
+import { UserRepository } from './user.repository';
+import { prisma } from '@/infrastructure/database/connection';
+import { hash } from '@/infrastructure/services/password.service';
+
+// Mock prisma and hash function
+jest.mock('@/infrastructure/database/connection', () => ({
+  prisma: {
+    user: {
+      create: jest.fn(),
+      findUnique: jest.fn(),
+    },
+  },
+}));
+
+jest.mock('@/infrastructure/services/password.service', () => ({
+  hash: jest.fn().mockImplementation((pwd) => Promise.resolve(`hashed_${pwd}`)),
+}));
+
+describe('UserRepository', () => {
+  let repository: UserRepository;
+
+  beforeEach(() => {
+    repository = new UserRepository();
+    jest.clearAllMocks();
+  });
+
+  describe('createUser', () => {
+    it('should hash the password and create a user', async () => {
+      const userData = {
+        name: 'Test User',
+        email: 'test@example.com',
+        password: 'password123',
+      };
+
+      const expectedUser = {
+        id: 'mock-uuid',
+        ...userData,
+        password: 'hashed_password123',
+      };
+
+      (prisma.user.create as jest.Mock).mockResolvedValue(expectedUser);
+
+      const result = await repository.createUser(userData);
+
+      expect(hash).toHaveBeenCalledWith('password123');
+      expect(prisma.user.create).toHaveBeenCalledWith({
+        data: {
+          ...userData,
+          password: 'hashed_password123',
+        },
+      });
+      expect(result).toEqual(expectedUser);
+    });
+  });
+
+  // Add more tests for other repository methods
+});
+```
+
+### 3. Use Case Implementation (Days 5-6)
+
+#### 3.1 Use Case Implementation
+```typescript
+// src/application/use-cases/register-user/register-user.usecase.ts
+import { inject, injectable } from 'tsyringe';
+import { User } from '@/domains/user/entities/user.entity';
+import { IRegisterUserUseCase } from '@/domains/user/use-cases/register-user.usecase';
+import { IUserRepository } from '@/domains/user/repositories/user.repository';
+
+@injectable()
+export class RegisterUserUseCase implements IRegisterUserUseCase {
+  constructor(
+    @inject('UserRepository') private userRepository: IUserRepository
+  ) {}
+
+  async execute(userData: Omit<User, 'id'>): Promise<User> {
+    const existingUser = await this.userRepository.getUserByEmail(userData.email);
+    
+    if (existingUser) {
+      throw new Error('User with this email already exists');
+    }
+    
+    return this.userRepository.createUser(userData);
+  }
+}
+```
+
+#### 3.2 Use Case Tests
+```typescript
+// src/application/use-cases/register-user/register-user.usecase.test.ts
+import { RegisterUserUseCase } from './register-user.usecase';
+import { container } from 'tsyringe';
+
+// Mock repository
+const mockUserRepository = {
+  createUser: jest.fn(),
+  getUserByEmail: jest.fn(),
+};
+
+// Setup DI for testing
+beforeEach(() => {
+  container.clearInstances();
+  container.register('UserRepository', {
+    useValue: mockUserRepository,
+  });
+});
+
+describe('RegisterUserUseCase', () => {
+  let useCase: RegisterUserUseCase;
+
+  beforeEach(() => {
+    useCase = container.resolve(RegisterUserUseCase);
+    jest.clearAllMocks();
+  });
+
+  it('should throw an error if user with email already exists', async () => {
+    const userData = {
+      name: 'Test User',
+      email: 'existing@example.com',
+      password: 'password123',
+    };
+
+    mockUserRepository.getUserByEmail.mockResolvedValue({
+      id: 'existing-id',
+      ...userData,
+    });
+
+    await expect(useCase.execute(userData)).rejects.toThrow(
+      'User with this email already exists'
+    );
+    expect(mockUserRepository.getUserByEmail).toHaveBeenCalledWith(userData.email);
+    expect(mockUserRepository.createUser).not.toHaveBeenCalled();
+  });
+
+  it('should create a new user if email does not exist', async () => {
+    const userData = {
+      name: 'Test User',
+      email: 'new@example.com',
+      password: 'password123',
+    };
+
+    const expectedUser = {
+      id: 'new-id',
+      ...userData,
+    };
+
+    mockUserRepository.getUserByEmail.mockResolvedValue(null);
+    mockUserRepository.createUser.mockResolvedValue(expectedUser);
+
+    const result = await useCase.execute(userData);
+
+    expect(mockUserRepository.getUserByEmail).toHaveBeenCalledWith(userData.email);
+    expect(mockUserRepository.createUser).toHaveBeenCalledWith(userData);
+    expect(result).toEqual(expectedUser);
+  });
+});
+```
+
+### 4. Next.js Server Actions (Days 7-8)
+
+#### 4.1 Server Action Implementation
+```typescript
+// src/app/actions/register-user.action.ts
+'use server';
+
+import { container } from '@/infrastructure/di/container';
+import { UserSchema } from '@/domains/user/entities/user.entity';
+import { IRegisterUserUseCase } from '@/domains/user/use-cases/register-user.usecase';
+
+export async function registerUser(formData: FormData) {
+  try {
+    // Parse and validate form data
+    const userData = {
+      name: formData.get('name') as string,
+      email: formData.get('email') as string,
+      password: formData.get('password') as string,
+    };
+
+    const validationResult = UserSchema.omit({ id: true }).safeParse(userData);
+    
+    if (!validationResult.success) {
+      return { 
+        success: false, 
+        error: validationResult.error.flatten() 
+      };
+    }
+    
+    // Resolve the use case from the container
+    const registerUserUseCase = container.resolve<IRegisterUserUseCase>('RegisterUserUseCase');
+    
+    // Execute the use case
+    const user = await registerUserUseCase.execute(validationResult.data);
+    
+    // Remove sensitive data
+    const { password, ...userWithoutPassword } = user;
+    
+    return { 
+      success: true, 
+      data: userWithoutPassword 
+    };
+  } catch (error: any) {
+    return { 
+      success: false, 
+      error: { message: error.message || 'Something went wrong' } 
+    };
+  }
+}
+```
+
+#### 4.2 Server Action Tests
+```typescript
+// src/app/actions/register-user.action.test.ts
+import { registerUser } from './register-user.action';
+import { container } from '@/infrastructure/di/container';
+
+// Mock use case
+const mockRegisterUserUseCase = {
+  execute: jest.fn(),
+};
+
+// Mock FormData
+function createFormData(data: Record<string, string>) {
+  const formData = new FormData();
+  Object.entries(data).forEach(([key, value]) => {
+    formData.append(key, value);
+  });
+  return formData;
+}
+
+// Setup DI for testing
+beforeEach(() => {
+  container.clearInstances();
+  container.register('RegisterUserUseCase', {
+    useValue: mockRegisterUserUseCase,
+  });
+});
+
+describe('registerUser server action', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('should register a user successfully', async () => {
+    const formData = createFormData({
+      name: 'Test User',
+      email: 'test@example.com',
+      password: 'password123',
+    });
+
+    const expectedUser = {
+      id: 'new-id',
+      name: 'Test User',
+      email: 'test@example.com',
+      password: 'hashed_password',
+    };
+
+    mockRegisterUserUseCase.execute.mockResolvedValue(expectedUser);
+
+    const result = await registerUser(formData);
+
+    expect(mockRegisterUserUseCase.execute).toHaveBeenCalledWith({
+      name: 'Test User',
+      email: 'test@example.com',
+      password: 'password123',
+    });
+
+    expect(result).toEqual({
+      success: true,
+      data: {
+        id: 'new-id',
+        name: 'Test User',
+        email: 'test@example.com',
+      },
+    });
+  });
+
+  it('should return validation errors for invalid data', async () => {
+    const formData = createFormData({
+      name: 'Te', // Too short
+      email: 'invalid-email',
+      password: 'short', // Too short
+    });
+
+    const result = await registerUser(formData);
+
+    expect(mockRegisterUserUseCase.execute).not.toHaveBeenCalled();
+    expect(result.success).toBe(false);
+    expect(result.error).toBeDefined();
+  });
+});
+```
+
+### 5. UI Implementation (Days 9-10)
+
+#### 5.1 UI Component Implementation
+```tsx
+// src/app/register/page.tsx
+'use client';
+
+import { useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { registerUser } from '@/app/actions/register-user.action';
+
+export default function RegisterPage() {
+  const [errors, setErrors] = useState<any>({});
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const router = useRouter();
+
+  const handleSubmit = async (formData: FormData) => {
+    setIsSubmitting(true);
+    setErrors({});
+
+    try {
+      const result = await registerUser(formData);
+
+      if (!result.success) {
+        setErrors(result.error);
+        return;
+      }
+
+      router.push('/login?registered=true');
+    } catch (error) {
+      setErrors({ form: 'Something went wrong' });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="w-full max-w-md mx-auto p-6">
+      <h1 className="text-2xl font-bold mb-6">Create an Account</h1>
+      
+      <form action={handleSubmit} className="space-y-4">
+        <div>
+          <label htmlFor="name" className="block text-sm font-medium mb-1">
+            Full Name
+          </label>
+          <input
+            id="name"
+            name="name"
+            type="text"
+            className="w-full p-2 border rounded"
+            disabled={isSubmitting}
+          />
+          {errors?.fieldErrors?.name && (
+            <p className="text-red-500 text-sm mt-1">{errors.fieldErrors.name[0]}</p>
+          )}
+        </div>
+        
+        <div>
+          <label htmlFor="email" className="block text-sm font-medium mb-1">
+            Email Address
+          </label>
+          <input
+            id="email"
+            name="email"
+            type="email"
+            className="w-full p-2 border rounded"
+            disabled={isSubmitting}
+          />
+          {errors?.fieldErrors?.email && (
+            <p className="text-red-500 text-sm mt-1">{errors.fieldErrors.email[0]}</p>
+          )}
+        </div>
+        
+        <div>
+          <label htmlFor="password" className="block text-sm font-medium mb-1">
+            Password
+          </label>
+          <input
+            id="password"
+            name="password"
+            type="password"
+            className="w-full p-2 border rounded"
+            disabled={isSubmitting}
+          />
+          {errors?.fieldErrors?.password && (
+            <p className="text-red-500 text-sm mt-1">{errors.fieldErrors.password[0]}</p>
+          )}
+        </div>
+        
+        {errors?.message && (
+          <p className="text-red-500 text-sm">{errors.message}</p>
+        )}
+        
+        <button
+          type="submit"
+          disabled={isSubmitting}
+          className="w-full bg-blue-500 text-white py-2 px-4 rounded hover:bg-blue-600 disabled:bg-blue-300"
+        >
+          {isSubmitting ? 'Registering...' : 'Register'}
+        </button>
+      </form>
+    </div>
+  );
+}
+```
+
+## Common Pitfalls to Avoid
+
+1. **Circular Dependencies**: Never import from app → application → domain → app
+2. **Domain Logic Leaks**: Keep validation and business rules in domain layer, not UI
+3. **Repository Bloat**: Repositories should be thin adapters, not contain business logic
+4. **Direct Database Access**: Never access database directly from UI or application layer
+5. **Over-engineering**: Start simple and add complexity only when needed
+
+## Testing Strategy
+
+1. **Domain Layer**: Pure unit tests for entities and business rules
+   ```typescript
+   // src/domains/user/entities/user.entity.test.ts
+   import { UserSchema } from './user.entity';
+
+   describe('UserSchema', () => {
+     it('should validate valid user data', () => {
+       const result = UserSchema.safeParse({
+         id: '123e4567-e89b-12d3-a456-426614174000',
+         name: 'John Doe',
+         email: 'john@example.com',
+         password: 'password123',
+       });
+       expect(result.success).toBe(true);
+     });
+
+     it('should reject invalid email', () => {
+       const result = UserSchema.safeParse({
+         name: 'John Doe',
+         email: 'not-an-email',
+         password: 'password123',
+       });
+       expect(result.success).toBe(false);
+     });
+   });
+   ```
+
+2. **Infrastructure Layer**: Integration tests with test database
+3. **Application Layer**: Unit tests with mocked repositories
+4. **UI Layer**: Component tests with React Testing Library and mocked API calls
+
+Aim for 80% test coverage minimum in domain and application layers.
+
+## Dependency Management with TSyringe
+
+- **Dependencies flow inward**: UI → Application → Domain
+- **Domain layer** has no external dependencies except validation libraries
+- **Dependency Injection** with TSyringe used throughout the application
+- **Container** used to register and resolve dependencies
+
+```typescript
+// src/infrastructure/di/container.ts
+import { container } from 'tsyringe';
+import { IUserRepository } from '@/domains/user/repositories/user.repository';
+import { UserRepository } from '@/infrastructure/repositories/user/user.repository';
+import { IRegisterUserUseCase } from '@/domains/user/use-cases/register-user.usecase';
+import { RegisterUserUseCase } from '@/application/use-cases/register-user/register-user.usecase';
+
+// Register repositories
+container.registerSingleton<IUserRepository>('UserRepository', UserRepository);
+
+// Register use cases
+container.registerSingleton<IRegisterUserUseCase>('RegisterUserUseCase', RegisterUserUseCase);
+
+export { container };
+```
+
+## Performance Considerations
+
+1. **Data fetching**: Use server components for initial data loading
+2. **State management**: Keep state close to where it's used
+3. **Bundle size**: Use dynamic imports for large dependencies
+4. **API optimization**: Implement proper caching headers
+
+## When to Deviate from Architecture
+
+It's acceptable to deviate when:
+- Building small prototypes (under 5 pages)
+- Creating throwaway proof-of-concepts
+- Working on extremely UI-focused features with little business logic
+
+Always document architectural decisions that deviate from the standard pattern.
+
+## Migration Strategy for Existing Projects
+
+1. **Start with new features**: Apply clean architecture to new features first
+2. **Extract domain models**: Move existing models to domain layer one by one
+3. **Introduce repositories**: Replace direct database calls with repositories
+4. **Refactor use cases**: Extract business logic into use cases
+5. **Update UI components**: Connect UI to new architecture last
+
+## Code Style and Naming (OPTIONAL)
+
+- Use PascalCase for components, interfaces, types
+- Use camelCase for variables, functions, methods
+- Use kebab-case for file names
+
+## Additional Resources
+
+- [Domain-Driven Design by Eric Evans](https://www.domainlanguage.com/ddd/)
+- [Clean Architecture by Robert C. Martin](https://blog.cleancoder.com/uncle-bob/2012/08/13/the-clean-architecture.html)
+- [Next.js Documentation](https://nextjs.org/docs)
