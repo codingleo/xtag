@@ -8,7 +8,10 @@
     "start": "next start",
     "lint": "next lint",
     "prepare": "husky",
-    "test": "vitest --coverage --watch=false"
+    "test": "vitest --coverage --watch=false",
+    "test:watch": "vitest --watch",
+    "test:coverage": "vitest --coverage=true --watch=false",
+    "test:ui": "vitest --ui"
   },
   "dependencies": {
     "next": "15.1.6",
@@ -26,6 +29,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@vitest/coverage-istanbul": "^3.1.1",
+    "@vitest/ui": "^3.1.1",
     "eslint": "^9.20.0",
     "eslint-config-next": "15.1.6",
     "eslint-plugin-react": "^7.37.4",
